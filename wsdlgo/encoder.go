@@ -68,22 +68,24 @@ type goEncoder struct {
 	needsTag          map[string]string
 	needsStdPkg       map[string]bool
 	needsExtPkg       map[string]bool
+	importedSchemas   map[string]bool
 }
 
 // NewEncoder creates and initializes an Encoder that generates code to w.
 func NewEncoder(w io.Writer) Encoder {
 	return &goEncoder{
-		w:           w,
-		http:        http.DefaultClient,
-		stypes:      make(map[string]*wsdl.SimpleType),
-		ctypes:      make(map[string]*wsdl.ComplexType),
-		elements:    make(map[string]*wsdl.Element),
-		funcs:       make(map[string]*wsdl.Operation),
-		messages:    make(map[string]*wsdl.Message),
-		soapOps:     make(map[string]*wsdl.BindingOperation),
-		needsTag:    make(map[string]string),
-		needsStdPkg: make(map[string]bool),
-		needsExtPkg: make(map[string]bool),
+		w:               w,
+		http:            http.DefaultClient,
+		stypes:          make(map[string]*wsdl.SimpleType),
+		ctypes:          make(map[string]*wsdl.ComplexType),
+		elements:        make(map[string]*wsdl.Element),
+		funcs:           make(map[string]*wsdl.Operation),
+		messages:        make(map[string]*wsdl.Message),
+		soapOps:         make(map[string]*wsdl.BindingOperation),
+		needsTag:        make(map[string]string),
+		needsStdPkg:     make(map[string]bool),
+		needsExtPkg:     make(map[string]bool),
+		importedSchemas: make(map[string]bool),
 	}
 }
 
@@ -239,16 +241,28 @@ func (ge *goEncoder) importSchema(d *wsdl.Definitions) error {
 		if err != nil {
 			return err
 		}
+		for _, i := range d.Schema.Imports {
+			err := ge.importRemote(i.Location, &d.Schema)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 // download xml from url, decode in v.
 func (ge *goEncoder) importRemote(url string, v interface{}) error {
+	_, alreadyImported := ge.importedSchemas[url]
+	if alreadyImported {
+		return nil
+	}
+
 	resp, err := ge.http.Get(url)
 	if err != nil {
 		return err
 	}
+	ge.importedSchemas[url] = true
 	defer resp.Body.Close()
 	return xml.NewDecoder(resp.Body).Decode(v)
 }
@@ -1004,6 +1018,11 @@ func (ge *goEncoder) genComplexContent(w io.Writer, d *wsdl.Definitions, ct *wsd
 			}
 		}
 	}
+
+	for _, attr := range ext.Attributes {
+		ge.genAttributeField(w, attr)
+	}
+
 	if ext.Sequence == nil {
 		return nil
 	}
@@ -1029,6 +1048,9 @@ func (ge *goEncoder) genElements(w io.Writer, ct *wsdl.ComplexType) error {
 	}
 	for _, el := range ct.Sequence.Elements {
 		ge.genElementField(w, el)
+	}
+	for _, attr := range ct.Attributes {
+		ge.genAttributeField(w, attr)
 	}
 	return nil
 }
@@ -1075,6 +1097,21 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 	}
 	typ := ge.wsdl2goType(el.Type)
 	if el.Nillable || el.Min == 0 {
+		tag += ",omitempty"
+	}
+	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
+		typ, tag, tag, tag)
+}
+
+func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute) {
+	if attr.Type == "" {
+		attr.Type = "string"
+	}
+
+	tag := fmt.Sprintf("%v,attr", attr.Name)
+	fmt.Fprintf(w, "%s ", strings.Title(attr.Name))
+	typ := ge.wsdl2goType(attr.Type)
+	if attr.Nillable || attr.Min == 0 {
 		tag += ",omitempty"
 	}
 	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
