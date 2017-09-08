@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"reflect"
 )
 
 const XSINamespace = "http://www.w3.org/2001/XMLSchema-instance"
@@ -49,11 +50,46 @@ type Client struct {
 	Pre                    func(*http.Request) // Optional hook to modify outbound requests
 }
 
+type XMLTyper interface {
+	SetXMLType()
+}
+
+func setXMLType(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+	switch v.Type().Kind() {
+	case reflect.Interface:
+		setXMLType(v.Elem())
+	case reflect.Ptr:
+		if v.IsNil() {
+			break
+		}
+		XMLTyperType := reflect.TypeOf((*XMLTyper)(nil)).Elem()
+		ok := v.Type().Implements(XMLTyperType)
+		if ok {
+			v.MethodByName("SetXMLType").Call([]reflect.Value{})
+		}
+		setXMLType(v.Elem())
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			setXMLType(v.Index(i))
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			setXMLType(v.Field(i))
+		}
+	default:
+	}
+	return
+}
+
 func doRoundTrip(c *Client, setHeaders func(*http.Request), in, out Message) error {
+	setXMLType(reflect.ValueOf(in))
 	req := &Envelope{
 		EnvelopeAttr: c.Envelope,
 		NSAttr:       c.Namespace,
-		XSIAttr:      c.XSINamespace,
+		XSIAttr:      XSINamespace,
 		Header:       c.Header,
 		Body:         Body{Message: in},
 	}

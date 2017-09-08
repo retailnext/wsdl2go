@@ -69,6 +69,7 @@ type goEncoder struct {
 	needsStdPkg       map[string]bool
 	needsExtPkg       map[string]bool
 	importedSchemas   map[string]bool
+	usedNamespaces    map[string]string
 }
 
 // NewEncoder creates and initializes an Encoder that generates code to w.
@@ -154,7 +155,9 @@ func (ge *goEncoder) Encode(d *wsdl.Definitions) error {
 }
 
 func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
+	ge.unionSchemasData(d, &d.Schema)
 	err := ge.importParts(d)
+	ge.usedNamespaces = d.Namespaces
 	if err != nil {
 		return fmt.Errorf("wsdl import: %v", err)
 	}
@@ -237,18 +240,37 @@ func (ge *goEncoder) importSchema(d *wsdl.Definitions) error {
 		if imp.Location == "" {
 			continue
 		}
-		err := ge.importRemote(imp.Location, &d.Schema)
+		schema := &wsdl.Schema{}
+		err := ge.importRemote(imp.Location, schema)
 		if err != nil {
 			return err
 		}
-		for _, i := range d.Schema.Imports {
-			err := ge.importRemote(i.Location, &d.Schema)
+		ge.unionSchemasData(d, schema)
+		for _, i := range schema.Imports {
+			schema = &wsdl.Schema{}
+			err := ge.importRemote(i.Location, schema)
 			if err != nil {
 				return err
 			}
+			ge.unionSchemasData(d, schema)
 		}
 	}
 	return nil
+}
+
+func (ge *goEncoder) unionSchemasData(d *wsdl.Definitions, s *wsdl.Schema) {
+	for ns := range s.Namespaces {
+		d.Namespaces[ns] = s.Namespaces[ns]
+	}
+	for _, ct := range s.ComplexTypes {
+		ct.TargetNamespace = s.TargetNamespace
+	}
+	for _, st := range s.SimpleTypes {
+		st.TargetNamespace = s.TargetNamespace
+	}
+	d.Schema.ComplexTypes = append(d.Schema.ComplexTypes, s.ComplexTypes...)
+	d.Schema.SimpleTypes = append(d.Schema.SimpleTypes, s.SimpleTypes...)
+	d.Schema.Elements = append(d.Schema.Elements, s.Elements...)
 }
 
 // download xml from url, decode in v.
@@ -853,6 +875,7 @@ func (ge *goEncoder) writeGoTypes(w io.Writer, d *wsdl.Definitions) error {
 		if err != nil {
 			return err
 		}
+		ge.genGoXMLTypeFunction(&b, ct)
 	}
 	ge.genDateTypes(w) // must be called last
 	_, err = io.Copy(w, &b)
@@ -956,6 +979,20 @@ func (ge *goEncoder) genValidator(w io.Writer, typeName string, r *wsdl.Restrict
 	})
 }
 
+func (ge *goEncoder) genGoXMLTypeFunction(w io.Writer, ct *wsdl.ComplexType) {
+	if ct.ComplexContent == nil || ct.ComplexContent.Extension == nil || ct.TargetNamespace == "" {
+		return
+	}
+
+	ext := ct.ComplexContent.Extension
+	if ext.Base != "" {
+		ge.writeComments(w, "SetXMLType", "")
+		fmt.Fprintf(w, "func (t *%s) SetXMLType() {\n", ct.Name)
+		fmt.Fprintf(w, "t.TypeAttrXSI = \"objtype:%v\"\n", ct.Name)
+		fmt.Fprintf(w, "t.TypeNamespace = \"%v\"\n}\n\n", ct.TargetNamespace)
+	}
+}
+
 func (ge *goEncoder) genGoStruct(w io.Writer, d *wsdl.Definitions, ct *wsdl.ComplexType) error {
 	c := 0
 	if len(ct.AllElements) == 0 {
@@ -989,6 +1026,11 @@ func (ge *goEncoder) genGoStruct(w io.Writer, d *wsdl.Definitions, ct *wsdl.Comp
 			d.TargetNamespace, elName)
 	}
 	err := ge.genStructFields(w, d, ct)
+
+	if ct.ComplexContent != nil && ct.ComplexContent.Extension != nil {
+		fmt.Fprint(w, "TypeAttrXSI   string `xml:\"xsi:type,attr,omitempty\"`\n")
+		fmt.Fprint(w, "TypeNamespace string `xml:\"xmlns:objtype,attr,omitempty\"`\n")
+	}
 	if err != nil {
 		return err
 	}
